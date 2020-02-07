@@ -6,25 +6,161 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
 
-## R Markdown
+```{r}
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+library(tibble)
+library(fable)
+library(janitor)
+library(forecast)
+library(janitor)
+library(tidyverse)
+library(tsibble)
+library(paletteer)
+library(lubridate)
+library(tidyverse)
+library(here)
+library(feasts)
+library(sf)
+library(tmap)
+library(mapview)
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+us_renew <- read_csv("data/renewables_cons_prod.csv") %>% 
+  clean_names()
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Make description all lowercase
+Only keep observations where description variable contains the string pattern "consumption"
+Remove any observations where description variable contains "total"
+
+```{r}
+renew_clean <- us_renew %>% 
+  mutate(description = str_to_lower(description)) %>% 
+  filter(str_detect(description, pattern = "consumption")) %>% 
+  filter(!str_detect(description, patter = "total"))
+```
+
+convert column to date
+make it understood as time series associated data frame
+```{r}
+renew_date <- renew_clean %>% 
+  mutate(yr_mo_day = lubridate::parse_date_time(yyyymm, "ym")) %>% 
+  mutate(month_sep = yearmonth(yr_mo_day)) %>% 
+  mutate(value = as.numeric(value)) %>% 
+  drop_na(month_sep, value)
+```
+
+make version with month and year in separate columns
+```{r}
+renew_parsed <- renew_date %>% 
+  mutate(month = month(yr_mo_day, label = TRUE)) %>%
+  mutate(year = year(yr_mo_day))
+
+renew_parsed
+  
+```
+
+look at it
+```{r}
+renew_gg <- ggplot(data = renew_date, aes(x = month_sep, y = value)) + 
+  geom_line(aes(color = description))
+
+renew_gg
+```
+
+updating colors with paletteer
+
+```{r}
+renew_gg + scale_color_paletteer_d("ggthemr::lilac")
+```
+
+coerce renew_parsed to tsibble
+```{r}
+renew_ts <- as_tsibble(renew_parsed, key = description, index = month_sep)
+```
+
+look at time series a few ways
+```{r}
+renew_ts %>%
+  autoplot(value)
+
+
+#renew_ts %>% gg_subseries(value) # didn't work
+
+#renew_ts %>% gg_season(value)
+
+
+
+#make in gg plot!
+
+
+
+ggplot(data = renew_parsed, aes(x = month, y = value, group = year)) +
+  geom_line(aes(color = year )) +
+  facet_wrap(~description,
+             ncol = 1,
+             scales = "free",
+             strip.position = "right")
+```
+
+look at hydroelectric energy consumptions
+```{r}
+hydro_ts <- renew_ts %>% 
+  filter(description == "hydroelectric power consumption")
+
+
+hydro_ts %>% autoplot(value)
+# sub series
+# season
+
+ggplot(hydro_ts, aes(x = month, y = value, group = year))+
+  geom_line(aes(color = year))
+```
+
+what if i want the quartely average consuption for hydro
+
+```{r}
+hydro_quarterly <- hydro_ts %>% 
+ index_by(year_qu = ~(yearquarter(.))) %>% 
+  summarize(avg_consumption = mean(value)) # not working?
+```
+
+# Decompose that hydro_ts need the feast package!!!
+```{r}
+#dcmp <- hydro_ts %>% 
+#  model(STL(value ~ season(window = 5)))
+#components(dcmp) %>% 
+#  autoplot()
+
+#hist(components(dcmp)$remainder)
+
+hydro_ts %>% 
+  ACF(value) %>% 
+  autoplot()
+
+```
+```{r}
+### DANGER DANGER
+
+hydro_model <- hydro_ts %>% 
+  model(
+    ARIMA(value)
+  ) %>% 
+  fabletools::forecast(h = "4 years")
+
+hydro_model %>% autoplot(filter(hydro_ts, year(month_sep) > 2010))
+
+
+# didnt work
+```
+
+make a world map
+```{r}
+world <- read_sf(dsn = here("data", "TM_WORLD_BORDERS_SIMPL-0.3-1"),
+                 layer = "TM_WORLD_BORDERS_SIMPL-0.3")
+```
+
